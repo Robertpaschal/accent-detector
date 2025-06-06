@@ -26,8 +26,7 @@ Using a pretrained deep learning model, the app extracts the audio, processes it
 
 ## 🖥️ Demo
 
-Try the live app here: [https://your-streamlit-app-link](https://your-streamlit-app-link)  
-*(Replace with your deployed Streamlit Cloud or Hugging Face Spaces link)*
+Try the live app here: [English Accent Detector](https://english-accent-detector-project.streamlit.app/)  
 
 ---
 
