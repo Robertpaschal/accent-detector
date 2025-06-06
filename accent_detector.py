@@ -1,106 +1,164 @@
 #!/usr/bin/env python3
 """
-accent_detector.py: Extract audio from video (MP4) and classify English accents
-using a pretrained SpeechBrain model (CommonAccent XLSR).
+accent_detector.py
+
+Provides functions to detect English accents from audio extracted
+from video URLs or local audio/video files using a pretrained
+SpeechBrain accent classification model.
 """
 
 import os
 import tempfile
-import torchaudio
 import requests
-
-# New import path
-from speechbrain.pretrained import EncoderClassifier
+from typing import Optional, Dict, Any
 from moviepy import VideoFileClip
+from speechbrain.pretrained import EncoderClassifier
+import streamlit as st
 
-# ———————————————— Setup Accent Classifier ————————————————
-# This will load the “CommonAccent” XLSR‐based accent ID model from HF:
-#
-#   https://huggingface.co/Jzuluaga/accent-id-commonaccent_xlsr-en-english
-#
-# It expects a 16 kHz single‐channel WAV and returns:
-#   out_prob : probability vector over 16 accents
-#   score    : confidence score (log‐posterior)
-#   index    : integer index of the predicted accent
-#   text_lab : string label of the predicted accent (e.g. "us", "england", "australia", etc.)
-#
-classifier = EncoderClassifier.from_hparams(
-    source="Jzuluaga/accent-id-commonaccent_xlsr-en-english",
-    savedir="tmp/accent_classification_model"
-)
 
-def download_video(video_url: str) -> str:
+@st.cache_resource(show_spinner=False)
+def get_classifier() -> EncoderClassifier:
     """
-    Download a public video (e.g. Loom MP4) from `video_url` into a local temp file.
-    Return the local path to that MP4.
+    Load and cache the pre-trained accent classifier model from HuggingFace.
+    Returns:
+        EncoderClassifier: SpeechBrain encoder classifier instance.
     """
-    response = requests.get(video_url, stream=True)
-    if response.status_code != 200:
-        raise Exception(f"Failed to download video (HTTP {response.status_code})")
+    return EncoderClassifier.from_hparams(
+        source="Jzuluaga/accent-id-commonaccent_xlsr-en-english",
+        savedir="tmp/accent_classification_model",
+        run_opts={"device":"cpu"},
+    )
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    for chunk in response.iter_content(chunk_size=8192):
-        if chunk:
-            tmp.write(chunk)
-    tmp.close()
-    return tmp.name
+
+def download_video(url: str, timeout: int = 15) -> str:
+    """
+    Download video from a public URL to a temporary file.
+    
+    Args:
+        url (str): URL of the video.
+        timeout (int): Timeout for the request in seconds.
+
+    Returns:
+        str: Path to the downloaded temporary video file.
+
+    Raises:
+        requests.RequestException: If download fails.
+    """
+    response = requests.get(url, stream=True, timeout=timeout)
+    response.raise_for_status()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                tmp_file.write(chunk)
+        return tmp_file.name
 
 
 def extract_audio(video_path: str) -> str:
     """
-    Given a local MP4 file at `video_path`, extract its audio to a 16 kHz WAV.
-    Return the local path to that WAV file.
+    Extract audio from a video file and save it as a WAV temporary file.
+
+    Args:
+        video_path (str): Path to the video file.
+
+    Returns:
+        str: Path to the temporary WAV audio file.
+
+    Raises:
+        Exception: If audio extraction fails.
     """
-    audio_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
-    video = VideoFileClip(video_path)
-    # Write PCM16 WAV @ 16 kHz
-    video.audio.write_audiofile(
-        audio_path, codec="pcm_s16le", fps=16000, verbose=False, logger=None
-    )
-    return audio_path
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as audio_file:
+        video = VideoFileClip(video_path)
+        video.audio.write_audiofile(
+            audio_file.name,
+            verbose=False,
+            logger=None,
+            codec="pcm_s16le",
+            fps=16000,
+        )
+        return audio_file.name
 
 
-def classify_accent(audio_path: str) -> dict:
+def classify_accent(audio_path: str) -> Dict[str, Any]:
     """
-    Run the pretrained SpeechBrain accent‐ID classifier on a local WAV file.
-    Returns a dict with:
-      - "accent"    : string label (e.g., "us", "england", "australia", etc.)
-      - "confidence": float in [0.0, 1.0]
-      - "summary"   : human‐readable summary line
-    """
-    # The classifier.classify_file method:
-    #   - loads & resamples the WAV internally
-    #   - returns (out_prob, score, index, text_lab)
-    out_prob, score, index, text_lab = classifier.classify_file(audio_path)
+    Classify the English accent from an audio file.
 
-    accent_label = text_lab  # e.g. "us", "england", etc.
-    # `score` may be a tensor; convert to float
-    confidence_score = float(score.item()) if hasattr(score, "item") else float(score)
+    Args:
+        audio_path (str): Path to the audio WAV file.
+
+    Returns:
+        dict: Result dictionary containing:
+            - "summary" (str): Human-readable summary.
+            - "accent" (str): Predicted accent label.
+            - "confidence" (float): Confidence score between 0 and 1.
+            - "probabilities" (dict): Mapping of accents to their probabilities.
+    
+    Raises:
+        Exception: If classification fails.
+    """
+    classifier = get_classifier()
+
+    # Run classification
+    out_prob, score, _, text_lab = classifier.classify_file(audio_path)
+
+    labels = classifier.hparams.label_encoder.labels
+
+    # Map each label to its corresponding probability for first sample
+    probabilities = {label: float(prob) for label, prob in zip(labels, out_prob[0])}
+
+    accent = text_lab[0]
+    confidence = float(score[0])
+
+    summary = f"Detected accent: {accent.capitalize()} with confidence {confidence:.2%}"
 
     return {
-        "accent": accent_label,
-        "confidence": confidence_score,
-        "summary": f"Detected accent: {accent_label} (confidence: {confidence_score:.2%})",
+        "summary": summary,
+        "accent": accent,
+        "confidence": confidence,
+        "probabilities": probabilities,
     }
 
 
-def detect_accent_from_url(video_url: str) -> dict:
+def cleanup_files(*paths: Optional[str]) -> None:
     """
-    Full pipeline: download video from `video_url` → extract audio → classify accent.
-    Cleans up temp files after inference.
+    Delete temporary files if they exist.
+
+    Args:
+        *paths (str): Paths to files to delete.
     """
-    video_path = download_video(video_url)
-    audio_path = extract_audio(video_path)
-    result = classify_accent(audio_path)
+    for path in paths:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
-    # Clean up temporary files
-    try:
-        os.remove(video_path)
-    except OSError:
-        pass
-    try:
-        os.remove(audio_path)
-    except OSError:
-        pass
 
-    return result
+def detect_accent_from_url(url: str) -> Optional[Dict[str, Any]]:
+    """
+    Download a video from a URL, extract audio, classify accent, and cleanup temp files.
+
+    Args:
+        url (str): URL of the video.
+
+    Returns:
+        Optional[dict]: Classification result dict or None on failure.
+    """
+    tmp_video_path = None
+    tmp_audio_path = None
+    try:
+        tmp_video_path = download_video(url)
+        tmp_audio_path = extract_audio(tmp_video_path)
+        return classify_accent(tmp_audio_path)
+    except Exception as e:
+        st.error(f"Failed to process the video URL: {e}")
+        st.info(
+            "Troubleshooting tips:\n"
+            "- Ensure the URL is a direct link to a public video (e.g., MP4, MOV, MKV).\n"
+            "- The video should be accessible and not private or restricted.\n"
+            "- Try uploading a local file if the URL does not work.\n"
+            "- Large or long videos may take longer to process or may fail.\n"
+            "- Only English speech is supported for accent detection."
+        )
+        return None
+    finally:
+        cleanup_files(tmp_video_path, tmp_audio_path)
